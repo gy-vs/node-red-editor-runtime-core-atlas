@@ -19,12 +19,15 @@ var request = require("supertest");
 var express = require('express');
 var sinon = require('sinon');
 var fs = require("fs");
+var path = require("path");
 
 var app = express();
 
 var NR_TEST_UTILS = require("nr-test-utils");
 
 var theme = NR_TEST_UTILS.require("@node-red/editor-api/lib/editor/theme");
+
+var themePluginWithIconsPath = path.join(__dirname,"resources","theme-plugin-with-icons");
 
 describe("api/editor/theme", function () {
     beforeEach(function () {
@@ -271,5 +274,101 @@ describe("api/editor/theme", function () {
         context.page.scripts.should.have.lengthOf(1);
         context.page.scripts[0].should.eql('theme/scripts/file1.js');
 
+    });
+
+    describe("theme plugin palette rules", function() {
+        var themeApp;
+        var themePlugin = {
+            id: 'test-theme-icons',
+            path: themePluginWithIconsPath,
+            palette: {
+                theme: [
+                    { type: 'inject', color: '#e4d725' },
+                    { type: 'inject', icon: 'banana.png' },
+                    { type: 'sub-.*', icon: 'sub/cherry.svg' },
+                    { type: 'missing', icon: 'does-not-exist.png' },
+                    { category: '.*', color: 'red' }
+                ]
+            }
+        };
+
+        beforeEach(function() {
+            // Use the real filesystem for these tests
+            fs.statSync.restore();
+            theme.init({
+                editorTheme: { theme: 'test-theme-icons' }
+            },{
+                plugins: { getPlugin: async function() { return themePlugin; } }
+            });
+            themeApp = theme.app();
+            return theme.context();
+        });
+        afterEach(function() {
+            // Re-stub so the outer afterEach can restore cleanly
+            sinon.stub(fs, "statSync").callsFake(function () { return true; });
+        });
+
+        it("exposes palette theme rules from the active theme plugin via settings", function() {
+            var settings = theme.settings();
+            settings.should.have.a.property("palette");
+            settings.palette.should.have.a.property("theme");
+            // The missing icon rule is dropped as the file cannot be served
+            settings.palette.theme.should.have.lengthOf(4);
+            settings.palette.theme[0].should.have.a.property("color", "#e4d725");
+            settings.palette.theme[1].should.have.a.property("icon", "theme/icons/test-theme-icons/banana.png");
+            settings.palette.theme[2].should.have.a.property("icon", "theme/icons/test-theme-icons/sub/cherry.svg");
+        });
+
+        it("keeps settings.js palette rules ahead of plugin rules", async function() {
+            theme.init({
+                editorTheme: {
+                    theme: 'test-theme-icons',
+                    palette: {
+                        editable: false,
+                        theme: [ { type: 'inject', color: '#123456' } ]
+                    }
+                }
+            },{
+                plugins: { getPlugin: async function() { return themePlugin; } }
+            });
+            theme.app();
+            await theme.context();
+            var settings = theme.settings();
+            settings.palette.should.have.a.property("editable", false);
+            settings.palette.theme[0].should.eql({ type: 'inject', color: '#123456' });
+            settings.palette.theme[1].should.have.a.property("color", "#e4d725");
+        });
+
+        it("serves plugin icons from the theme app", function(done) {
+            request(themeApp)
+                .get("/icons/test-theme-icons/banana.png")
+                .expect(200)
+                .end(function(err,res) {
+                    if (err) { return done(err); }
+                    res.headers["content-type"].should.match(/image\/png/);
+                    done();
+                });
+        });
+
+        it("serves plugin icons nested under the icons directory", function(done) {
+            request(themeApp)
+                .get("/icons/test-theme-icons/sub/cherry.svg")
+                .expect(200)
+                .end(function(err,res) {
+                    if (err) { return done(err); }
+                    res.headers["content-type"].should.match(/image\/svg\+xml/);
+                    done();
+                });
+        });
+
+        it("does not register an icon rule when the icon file is missing", function(done) {
+            var settings = theme.settings();
+            var missingRules = settings.palette.theme.filter(function(r) { return r.type === 'missing'; });
+            missingRules.should.have.lengthOf(0);
+            request(themeApp)
+                .get("/icons/test-theme-icons/does-not-exist.png")
+                .expect(404)
+                .end(function(err) { done(err); });
+        });
     });
 });
