@@ -90,4 +90,37 @@ describe("api/editor/settings", function() {
         });
     });
 
+    it('ensures the active theme plugin is loaded before returning settings', function(done) {
+        var themeInitialised = false;
+        sinon.stub(theme,"context").callsFake(async function() {
+            themeInitialised = true;
+            return {};
+        });
+        theme.settings.callsFake(function() {
+            return themeInitialised ? { palette: { theme: [ { type: "inject", color: "#e4d725" } ] } } : null;
+        });
+        info.init({},{
+            settings: {
+                getRuntimeSettings: function(opts) {
+                    return Promise.resolve({ a:1 })
+                }
+            }
+        });
+        request(app)
+        .get("/settings")
+        .expect(200)
+        .end(function(err,res) {
+            theme.context.restore();
+            theme.settings.callsFake(function() { return { existing: 123, test: 456 };});
+            if (err) {
+                return done(err);
+            }
+            res.body.should.have.property("a",1);
+            res.body.editorTheme.should.have.property("palette");
+            res.body.editorTheme.palette.should.have.property("theme");
+            res.body.editorTheme.palette.theme[0].should.eql({ type: "inject", color: "#e4d725" });
+            done();
+        });
+    });
+
 });

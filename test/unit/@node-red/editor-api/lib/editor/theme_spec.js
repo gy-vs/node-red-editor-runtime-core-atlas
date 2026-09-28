@@ -19,6 +19,7 @@ var request = require("supertest");
 var express = require('express');
 var sinon = require('sinon');
 var fs = require("fs");
+var path = require("path");
 
 var app = express();
 
@@ -271,5 +272,178 @@ describe("api/editor/theme", function () {
         context.page.scripts.should.have.lengthOf(1);
         context.page.scripts[0].should.eql('theme/scripts/file1.js');
 
+    });
+
+    it("includes palette theme rules from the active theme plugin", async function () {
+        theme.init({
+            editorTheme: {
+                theme: 'test-theme'
+            }
+        },{
+            plugins: { getPlugin: t => {
+                return ({'test-theme':{
+                    id: 'test-theme',
+                    path: '/absolute/path/to/plugin',
+                    palette: {
+                        theme: [
+                            { type: "inject", color: "#e4d725" },
+                            { type: "inject", icon: "banana.png" },
+                            { type: ".*", color: "red" }
+                        ]
+                    }
+                }})[t.id];
+            } }
+        });
+
+        const app = theme.app();
+        await theme.context();
+
+        const settings = theme.settings();
+        settings.should.have.a.property("palette");
+        settings.palette.should.have.a.property("theme");
+        settings.palette.theme.should.have.lengthOf(3);
+        settings.palette.theme[0].should.eql({ type: "inject", color: "#e4d725" });
+        // icon files shipped with the plugin are rewritten to served urls
+        settings.palette.theme[1].type.should.eql("inject");
+        settings.palette.theme[1].icon.should.match(/^theme\/icons\/\d+-banana\.png$/);
+        settings.palette.theme[2].should.eql({ type: ".*", color: "red" });
+    });
+
+    it("serves theme plugin icons from the theme app", async function () {
+        const iconDir = fs.mkdtempSync(path.join(require("os").tmpdir(),"nr-theme-"));
+        const iconsDir = path.join(iconDir,"icons");
+        fs.mkdirSync(iconsDir);
+        fs.writeFileSync(path.join(iconsDir,"banana.png"),"PNGDATA");
+
+        theme.init({
+            editorTheme: {
+                theme: 'test-theme'
+            }
+        },{
+            plugins: { getPlugin: t => {
+                return ({'test-theme':{
+                    id: 'test-theme',
+                    path: iconDir,
+                    palette: {
+                        theme: [
+                            { type: "inject", icon: "banana.png" }
+                        ]
+                    }
+                }})[t.id];
+            } }
+        });
+
+        const app = theme.app();
+        await theme.context();
+
+        const settings = theme.settings();
+        const iconUrl = settings.palette.theme[0].icon;
+        iconUrl.should.match(/^theme\/icons\/\d+-banana\.png$/);
+
+        const res = await request(app)
+            .get(iconUrl.substring("theme".length))
+            .buffer(true)
+            .parse(function(response, done) {
+                var chunks = [];
+                response.on("data", function(chunk) { chunks.push(chunk); });
+                response.on("end", function() { done(null, Buffer.concat(chunks)); });
+            });
+        res.status.should.eql(200);
+        res.body.toString().should.eql("PNGDATA");
+
+        fs.rmSync(iconDir, { recursive: true, force: true });
+    });
+
+    it("does not serve theme plugin icons outside the plugin directory", async function () {
+        theme.init({
+            editorTheme: {
+                theme: 'test-theme'
+            }
+        },{
+            plugins: { getPlugin: t => {
+                return ({'test-theme':{
+                    id: 'test-theme',
+                    path: '/absolute/path/to/plugin',
+                    palette: {
+                        theme: [
+                            { type: "inject", icon: "../escape.png" },
+                            { type: "inject", icon: "nested/../../escape.png" }
+                        ]
+                    }
+                }})[t.id];
+            } }
+        });
+
+        theme.app();
+        await theme.context();
+
+        const settings = theme.settings();
+        // traversal paths are not rewritten/served
+        settings.palette.theme[0].icon.should.eql("../escape.png");
+        settings.palette.theme[1].icon.should.eql("nested/../../escape.png");
+    });
+
+    it("settings.js palette theme rules take precedence over plugin rules", async function () {
+        theme.init({
+            editorTheme: {
+                theme: 'test-theme',
+                palette: {
+                    editable: false,
+                    theme: [
+                        { type: "inject", color: "#f0f" }
+                    ]
+                }
+            }
+        },{
+            plugins: { getPlugin: t => {
+                return ({'test-theme':{
+                    id: 'test-theme',
+                    path: '/absolute/path/to/plugin',
+                    palette: {
+                        editable: true,
+                        theme: [
+                            { type: "inject", color: "#e4d725" },
+                            { type: "inject", icon: "banana.png" }
+                        ]
+                    }
+                }})[t.id];
+            } }
+        });
+
+        theme.app();
+        await theme.context();
+
+        const settings = theme.settings();
+        settings.palette.editable.should.eql(false);
+        settings.palette.theme.should.have.lengthOf(3);
+        // settings.js rule is first so it wins
+        settings.palette.theme[0].should.eql({ type: "inject", color: "#f0f" });
+        settings.palette.theme[1].should.eql({ type: "inject", color: "#e4d725" });
+        settings.palette.theme[2].type.should.eql("inject");
+        settings.palette.theme[2].icon.should.match(/^theme\/icons\/\d+-banana\.png$/);
+    });
+
+    it("does not apply plugin palette rules when no theme is active", async function () {
+        theme.init({
+            editorTheme: {}
+        },{
+            plugins: { getPlugin: t => {
+                return ({'test-theme':{
+                    id: 'test-theme',
+                    path: '/absolute/path/to/plugin',
+                    palette: {
+                        theme: [
+                            { type: "inject", color: "#e4d725" }
+                        ]
+                    }
+                }})[t.id];
+            } }
+        });
+
+        theme.app();
+        await theme.context();
+
+        const settings = theme.settings();
+        should.not.exist(settings.palette);
     });
 });
